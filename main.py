@@ -1,10 +1,17 @@
 import os
 import argparse
 from binoculars.cuda_util import check_cuda
+from dotenv import load_dotenv
+from binoculars.env_utils import doublecheck_env, doublecheck_pkgs
+
+load_dotenv()
+
+# Check and print results
+doublecheck_env(".env")  # check environmental variables
+doublecheck_pkgs(pyproject_path="pyproject.toml", verbose=True)  # check packages
 
 if check_cuda() == False:
     assert False
-
 
 _arg_parser = argparse.ArgumentParser(description=__doc__)
 _arg_parser.add_argument(
@@ -15,13 +22,24 @@ _arg_parser.add_argument(
 )
 _args, _ = _arg_parser.parse_known_args()
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", _args.gpu)
-os.environ.setdefault("OMP_NUM_THREADS", "16")
-os.environ.setdefault("MKL_NUM_THREADS", "16")
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# os.environ.setdefault("CUDA_VISIBLE_DEVICES", _args.gpu)
+# os.environ.setdefault("OMP_NUM_THREADS", "16")
+# os.environ.setdefault("MKL_NUM_THREADS", "16")
+# os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+observer_name = "gpt2"
+performer_name = "gpt2"
+
+# observer_name = "tiiuae/Falcon3-1B-Base"
+# performer_name = "tiiuae/Falcon3-1B-Instruct"
+
+# observer_name = "tiiuae/falcon-7b"
+# performer_name = "tiiuae/falcon-7b-instruct"
 
 from binoculars import Binoculars
-bino = Binoculars()
+bino = Binoculars(observer_name_or_path = observer_name,
+                 performer_name_or_path = performer_name)
+
 
 # ChatGPT (GPT-4) output when prompted with “Can you write a few sentences about a capybara that is an astrophysicist?"
 sample_string = '''Dr. Capy Cosmos, a capybara unlike any other, astounded the scientific community with his 
