@@ -8,16 +8,41 @@ Usage:
     uv run python score_parquets.py data/wp.parquet --observer gpt2 --performer gpt2 --limit 10
     uv run python score_parquets.py data/*.parquet
     uv run python score_parquets.py data/ --text-column text --batch-size 16
-    uv run python score_parquets.py data/wp.parquet
-    uv run python score_parquets.py data/essay.parquet
-    uv run python score_parquets.py data/reuter.parquet
-    uv run python score_parquets.py data/wp2.parquet
-    uv run python score_parquets.py data/essay2.parquet
-    uv run python score_parquets.py data/reuter2.parquet
+    ----
+    uv run python score_parquets.py data/wp.parquet --cpu-threads 16 --gpu 0
+    uv run python score_parquets.py data/essay.parquet --cpu-threads 16 --gpu 1
+    uv run python score_parquets.py data/reuter.parquet --cpu-threads 16 --gpu 6
+    uv run python score_parquets.py data/wp2.parquet --cpu-threads 16 --gpu 0
+    uv run python score_parquets.py data/essay2.parquet --cpu-threads 16 --gpu 1
+    uv run python score_parquets.py data/reuter2.parquet --cpu-threads 16 --gpu 6
 """
 
 import argparse
+import os
 from pathlib import Path
+
+_arg_parser = argparse.ArgumentParser(description=__doc__)
+_arg_parser.add_argument("inputs", nargs="+", help="Parquet file(s) and/or directories containing parquet files")
+_arg_parser.add_argument("--text-column", default="text", help="Name of the column containing text to score")
+_arg_parser.add_argument("--batch-size", type=int, default=1, help="Number of texts scored per batch")
+_arg_parser.add_argument("--limit", type=int, default=0,
+                          help="Only process the first N rows per file, for debugging (0 = no limit)")
+_arg_parser.add_argument("--observer", default="tiiuae/falcon-7b", help="Observer model name or path")
+_arg_parser.add_argument("--performer", default="tiiuae/falcon-7b-instruct", help="Performer model name or path")
+_arg_parser.add_argument("--gpu", default=None,
+                          help="value for CUDA_VISIBLE_DEVICES (which GPU(s) to use, e.g. '0' or '0,1'). "
+                               "Default: leave unset so all visible GPUs are used")
+_arg_parser.add_argument("--cpu-threads", type=int, default=None,
+                          help="limit CPU threads used for inference (sets OMP_NUM_THREADS / MKL_NUM_THREADS). "
+                               "Default: leave unset")
+args = _arg_parser.parse_args()
+
+# GPU/CPU constraints must be set before torch (and anything importing it) is loaded.
+if args.gpu is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+if args.cpu_threads is not None:
+    os.environ["OMP_NUM_THREADS"] = str(args.cpu_threads)
+    os.environ["MKL_NUM_THREADS"] = str(args.cpu_threads)
 
 from dotenv import load_dotenv
 import pandas as pd
@@ -69,16 +94,6 @@ def score_file(bino: Binoculars, path: Path, text_column: str, batch_size: int, 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Score parquet files with Binoculars.")
-    parser.add_argument("inputs", nargs="+", help="Parquet file(s) and/or directories containing parquet files")
-    parser.add_argument("--text-column", default="text", help="Name of the column containing text to score")
-    parser.add_argument("--batch-size", type=int, default=1, help="Number of texts scored per batch")
-    parser.add_argument("--limit", type=int, default=0,
-                        help="Only process the first N rows per file, for debugging (0 = no limit)")
-    parser.add_argument("--observer", default="tiiuae/falcon-7b", help="Observer model name or path")
-    parser.add_argument("--performer", default="tiiuae/falcon-7b-instruct", help="Performer model name or path")
-    args = parser.parse_args()
-
     paths = collect_paths(args.inputs)
     if not paths:
         raise SystemExit("No parquet files found to score.")
