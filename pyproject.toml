@@ -3,8 +3,9 @@ name = "binoculars"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 dependencies = [
+    "torch>=2.11.0",
     "datasets>=5.0.0",
     "gradio>=6.19.0",
     "gradio-client>=2.5.0",
@@ -15,3 +16,13 @@ dependencies = [
     "sentencepiece>=0.2.1",
     "transformers[torch]>=5.12.1",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }

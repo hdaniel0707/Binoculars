@@ -1,5 +1,26 @@
-from binoculars import Binoculars
+import os
+import argparse
+from binoculars.cuda_util import check_cuda
 
+if check_cuda() == False:
+    assert False
+
+
+_arg_parser = argparse.ArgumentParser(description=__doc__)
+_arg_parser.add_argument(
+    "--gpu", default="0", help="value for CUDA_VISIBLE_DEVICES (which GPU(s) to use)"
+)
+_arg_parser.add_argument(
+    "--dataset", default="wp", help="which dataset to score (key into DATASETS)"
+)
+_args, _ = _arg_parser.parse_known_args()
+
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", _args.gpu)
+os.environ.setdefault("OMP_NUM_THREADS", "16")
+os.environ.setdefault("MKL_NUM_THREADS", "16")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+from binoculars import Binoculars
 bino = Binoculars()
 
 # ChatGPT (GPT-4) output when prompted with “Can you write a few sentences about a capybara that is an astrophysicist?"
