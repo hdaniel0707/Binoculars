@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import math
 import os
 from pathlib import Path
 
@@ -70,7 +71,7 @@ def collect_paths(inputs: list[str]) -> list[Path]:
     return [p for p in paths if not p.name.endswith("_binox0.parquet")]
 
 
-def score_file(bino: Binoculars, path: Path, text_column: str, batch_size: int, limit: int) -> Path:
+def score_file(bino: Binoculars, path: Path, text_column: str, batch_size: int, limit: int) -> tuple[Path, int, int]:
     df = pd.read_parquet(path)
     if text_column not in df.columns:
         raise ValueError(f"Column '{text_column}' not found in {path}. Available columns: {list(df.columns)}")
@@ -80,17 +81,30 @@ def score_file(bino: Binoculars, path: Path, text_column: str, batch_size: int, 
 
     texts = df[text_column].fillna("").astype(str).tolist()
 
-    scores = []
-    for i in tqdm(range(0, len(texts), batch_size), desc=path.name, unit="batch"):
-        batch = texts[i:i + batch_size]
-        scores.extend(bino.compute_score(batch))
+    # Binoculars/transformers can't handle a 0-token input, and there's nothing meaningful
+    # to score in an empty/blank text anyway, so leave those rows as NaN.
+    scoreable = [(i, t) for i, t in enumerate(texts) if t.strip()]
+    skipped = len(texts) - len(scoreable)
+    if skipped:
+        print(f"Skipping {skipped} empty/blank row(s) in {path.name} (score set to NaN)")
+
+    scores = [float("nan")] * len(texts)
+    for i in tqdm(range(0, len(scoreable), batch_size), desc=path.name, unit="batch"):
+        chunk = scoreable[i:i + batch_size]
+        idxs, batch_texts = zip(*chunk)
+        batch_scores = bino.compute_score(list(batch_texts))
+        for idx, score in zip(idxs, batch_scores):
+            scores[idx] = score
 
     df["binoculars_score"] = scores
 
+    n_null = sum(1 for s in scores if math.isnan(s))
+    n_good = len(scores) - n_null
+
     out_path = path.parent / f"{path.stem}_binox0.parquet"
     df.to_parquet(out_path, index=False)
-    print(f"Saved {len(df)} scored rows to {out_path}")
-    return out_path
+    print(f"Saved {len(df)} scored rows to {out_path} ({n_good} good, {n_null} null/skipped)")
+    return out_path, n_good, n_null
 
 
 def main():
@@ -107,9 +121,19 @@ def main():
         performer_name_or_path=args.performer,
     )
 
+    total_good = 0
+    total_null = 0
     for path in paths:
         print(f"\nScoring {path} ...")
-        score_file(bino, path, args.text_column, args.batch_size, args.limit)
+        _, n_good, n_null = score_file(bino, path, args.text_column, args.batch_size, args.limit)
+        total_good += n_good
+        total_null += n_null
+
+    total_rows = total_good + total_null
+    print(
+        f"\nSummary: {len(paths)} file(s), {total_rows} row(s) total "
+        f"-> {total_good} good, {total_null} null/skipped"
+    )
 
 
 if __name__ == "__main__":
