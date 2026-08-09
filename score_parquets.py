@@ -74,8 +74,16 @@ from binoculars.cuda_util import check_cuda
 from binoculars.env_utils import doublecheck_env, doublecheck_pkgs
 
 load_dotenv()
+# cwd-relative on purpose: the .env belongs to the checkout being worked in, so
+# running this from a parent repo that vendors this one picks up *its* .env.
 doublecheck_env(".env")
-doublecheck_pkgs(pyproject_path="pyproject.toml", verbose=True)
+# Relative to this file, NOT to cwd: the check compares requirements against what
+# is installed in the running interpreter, which is always this project's venv, so
+# the requirements have to be this project's too. Identical to "pyproject.toml"
+# when run from the project root; correct as well when run from anywhere else,
+# such as from the root of a repo that has this one as a submodule.
+doublecheck_pkgs(pyproject_path=Path(__file__).resolve().parent / "pyproject.toml",
+                 verbose=True)
 check_cuda()  # informational only; scoring still works on CPU, just slower
 
 
