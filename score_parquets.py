@@ -19,7 +19,19 @@ Usage:
     uv run python score_parquets.py data/essay_gpt54mini_binox0.parquet --cpu-threads 16 --gpu 0 --only-missing
     uv run python score_parquets.py data/reuter_gpt54mini_binox0.parquet --cpu-threads 16 --gpu 0 --only-missing
     uv run python score_parquets.py data/wp_gpt54mini_binox0.parquet --cpu-threads 16 --gpu 0 --only-missing
-"""
+    ---
+    uv run python score_parquets.py data/wp_binox0_norm.parquet --cpu-threads 16 --gpu 1
+    uv run python score_parquets.py data/essay_binox0_norm.parquet --cpu-threads 16 --gpu 3
+    uv run python score_parquets.py data/reuter_binox0_norm.parquet --cpu-threads 16 --gpu 4
+    uv run python score_parquets.py data/wp_gpt54mini_binox0_norm.parquet --cpu-threads 16 --gpu 5
+    uv run python score_parquets.py data/essay_gpt54mini_binox0_norm.parquet --cpu-threads 16 --gpu 3
+    uv run python score_parquets.py data/reuter_gpt54mini_binox0_norm.parquet --cpu-threads 16 --gpu 4
+    ----
+    uv run python score_parquets.py data/wp_gpt54mini_binox0_red_10w.parquet --cpu-threads 16 --gpu 3
+    uv run python score_parquets.py data/essay_gpt54mini_binox0_red_10w.parquet --cpu-threads 16 --gpu 4
+    uv run python score_parquets.py data/reuter_gpt54mini_binox0_red_10w.parquet --cpu-threads 16 --gpu 5
+    
+    """
 
 import argparse
 import math
@@ -247,8 +259,6 @@ def main():
 
     for path in paths:
         debug_scoreable_stat(path, args.text_column,args.limit)
-
-    assert False
 
     bino = Binoculars(
         observer_name_or_path=args.observer,

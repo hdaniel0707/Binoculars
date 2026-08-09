@@ -22,19 +22,19 @@ _arg_parser.add_argument(
 )
 _args, _ = _arg_parser.parse_known_args()
 
-# os.environ.setdefault("CUDA_VISIBLE_DEVICES", _args.gpu)
-# os.environ.setdefault("OMP_NUM_THREADS", "16")
-# os.environ.setdefault("MKL_NUM_THREADS", "16")
-# os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", _args.gpu)
+os.environ.setdefault("OMP_NUM_THREADS", "16")
+os.environ.setdefault("MKL_NUM_THREADS", "16")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-observer_name = "gpt2"
-performer_name = "gpt2"
+# observer_name = "gpt2"
+# performer_name = "gpt2"
 
 # observer_name = "tiiuae/Falcon3-1B-Base"
 # performer_name = "tiiuae/Falcon3-1B-Instruct"
 
-# observer_name = "tiiuae/falcon-7b"
-# performer_name = "tiiuae/falcon-7b-instruct"
+observer_name = "tiiuae/falcon-7b"
+performer_name = "tiiuae/falcon-7b-instruct"
 
 from binoculars import Binoculars
 bino = Binoculars(observer_name_or_path = observer_name,
