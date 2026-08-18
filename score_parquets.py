@@ -16,6 +16,18 @@ every file finishes, so an interrupt half-way through a multi-file run does not
 throw away the files that already completed. A file that fails mid-run is
 reported and skipped -- the remaining files still run.
 
+**Exit status**, because this script is mostly run by a pipeline rather than by
+hand, and a caller has nothing else to go on:
+
+    0   every file that had work to do was scored and written, or there was
+        nothing to do because everything already holds a score
+    1   at least one file failed, or the confirmation prompt was declined
+
+Skipping a bad file is what keeps a multi-file run going; it is *not* success,
+and returning 0 for it once let an unscored corpus through a pipeline that then
+embedded it and reported the whole run finished. So a run with anything in
+"skipped / failed" ends non-zero, however many other files went through.
+
 Where a score is recomputed on top of an existing one, the summary reports the
 change in three buckets -- identical / drifted / changed -- since re-running the
 models on the same text rarely reproduces bit-identical floats. It also counts
@@ -706,8 +718,10 @@ def main() -> None:
     if not args.yes:
         answer = input("Proceed? Type 'yes': ").strip().lower()
         if answer != "yes":
-            print("Aborted — no changes made.")
-            return
+            # Non-zero: declining is a decision not to do the work, and a
+            # caller that reads only the exit code must not take it for a run
+            # that scored everything.
+            raise SystemExit("Aborted — no changes made.")
 
     bino = Binoculars(
         observer_name_or_path=args.observer,
@@ -748,6 +762,13 @@ def main() -> None:
             written_summaries.append(save_summary(payload, out_path))
 
     print_summary(done, failed, written_summaries)
+
+    # After the summary, not instead of it: the caller gets a non-zero status
+    # and the operator still gets the whole table, including the files that did
+    # go through. The per-file `except` above is what keeps one bad file from
+    # losing the rest -- it is not a reason to call the run a success.
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
