@@ -31,8 +31,15 @@ class Binoculars(object):
                  use_bfloat16: bool = True,
                  max_token_observed: int = 512,
                  mode: str = "low-fpr",
+                 strict_tokenizer_check: bool = True,
+                 fp32_metrics: bool = False,
                  ) -> None:
-        assert_tokenizer_consistency(observer_name_or_path, performer_name_or_path)
+        # NOTE the thresholds above were calibrated for the Falcon-7B pair only.
+        # `mode` still picks one of them for any pair, so `predict()` is only
+        # meaningful for Falcon; `compute_score()` -- what score_parquets.py
+        # uses -- is threshold-free and fine for every pair.
+        assert_tokenizer_consistency(observer_name_or_path, performer_name_or_path,
+                                     strict=strict_tokenizer_check)
 
         self.change_mode(mode)
         self.observer_model = AutoModelForCausalLM.from_pretrained(observer_name_or_path,
@@ -50,10 +57,30 @@ class Binoculars(object):
         self.observer_model.eval()
         self.performer_model.eval()
 
+        # The cross-perplexity term is a cross-entropy between the two models'
+        # distributions over the SAME vocabulary axis, so a pair whose logit
+        # widths differ cannot be scored at all. Caught here rather than as a
+        # shape error thousands of rows into a corpus.
+        observer_vocab = getattr(self.observer_model.config, "vocab_size", None)
+        performer_vocab = getattr(self.performer_model.config, "vocab_size", None)
+        if None not in (observer_vocab, performer_vocab) and observer_vocab != performer_vocab:
+            raise ValueError(
+                f"Logit width differs: {observer_name_or_path} has vocab_size "
+                f"{observer_vocab}, {performer_name_or_path} has {performer_vocab}. "
+                "Binoculars needs the two distributions on one vocabulary axis."
+            )
+
         self.tokenizer = AutoTokenizer.from_pretrained(observer_name_or_path)
         if not self.tokenizer.pad_token:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.max_token_observed = max_token_observed
+        # Soft-target cross-entropy over a 130k-250k vocabulary in bfloat16 is
+        # meaningfully sloppier than over Falcon's 65k -- bf16 carries ~3 decimal
+        # digits, and the sum runs over four times as many terms. Casting the
+        # logits to fp32 for the metrics only (the models still run in bf16)
+        # costs one transient copy and removes that as a source of run-to-run
+        # noise when a wide-vocabulary pair is being evaluated.
+        self.fp32_metrics = fp32_metrics
 
     def change_mode(self, mode: str) -> None:
         if mode == "low-fpr":
@@ -86,6 +113,9 @@ class Binoculars(object):
         batch = [input_text] if isinstance(input_text, str) else input_text
         encodings = self._tokenize(batch)
         observer_logits, performer_logits = self._get_logits(encodings)
+        if self.fp32_metrics:
+            observer_logits = observer_logits.float()
+            performer_logits = performer_logits.float()
         ppl = perplexity(encodings, performer_logits)
         x_ppl = entropy(observer_logits.to(DEVICE_1), performer_logits.to(DEVICE_1),
                         encodings.to(DEVICE_1), self.tokenizer.pad_token_id)

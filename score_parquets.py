@@ -52,6 +52,26 @@ you is how big the change is corpus-wide -- the first 20 rows are one arbitrary
 slice, often all of one class -- so read it as "the mechanism works", not as an
 estimate of the eventual numbers.
 
+``--pair`` chooses the two models that do the scoring, from the registry in
+``model_pairs.py``, and with them the column their scores go in. This matters
+more than it looks: a Binoculars score is a ratio of two *particular* models'
+perplexities, so scores from two pairs are on different scales and are not
+comparable -- they must never share a column, and a rescore with a new pair is
+not a rescore at all, it is a new feature. The default stays ``falcon-7b``
+writing ``binoculars_score``, which is what every score already on disk is, so
+existing commands keep their meaning. ``--score-column`` overrides the name;
+``--observer``/``--performer`` still take arbitrary models but then *require* it.
+The per-file summary JSON is likewise named after the column, so one pair's
+record no longer overwrites another's.
+
+``--max-tokens``, ``--fp32-metrics`` and ``--allow-token-mismatch`` exist for the
+same experiments: the truncation cap, fp32 metrics for the wide-vocabulary pairs
+(a soft-target cross-entropy over 152k bf16 terms is a good deal noisier than
+over Falcon's 65k), and the escape hatch for a base/instruct pair whose
+tokenizers differ only in added chat tokens. Run ``check_pairs.py`` before any of
+them -- it settles tokenizer compatibility and memory from tokenizers alone,
+before 30 GB of weights is downloaded.
+
 ``--gpu`` and ``--cpu-threads`` pin the run to one GPU and cap the CPU pools, so
 several corpora can be scored side by side on a multi-GPU box without the runs
 fighting each other for threads. Both are applied before torch is imported,
@@ -111,11 +131,101 @@ My example:
     uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
         data/parquet/x_ghostbuster_gpt54mini_0807A.parquet --recompute --limit 20 \
         -o data/parquet/x_ghostbuster_gpt54mini_0807A_binox0.parquet --cpu-threads 16 --gpu 5
+
+--------------------------------------------------------------------------------
+COMPARING SCORING PAIRS -- the run book
+--------------------------------------------------------------------------------
+Why: with the Falcon pair, gpt-5.6-luna text is separated on the Ghostbuster
+domains (ROC-AUC 0.74-0.84) and *inverted* on the science domains (0.19-0.46,
+AI scoring above human). Same generator, same standardisation, opposite result,
+so the question is whether a newer, more science-competent pair recovers the
+science domains without losing the Ghostbuster ones. Every command below is run
+from the parent repo root (episteme-ai). Commands are given for GPU 0; change
+--gpu per run to spread them over the box.
+
+⚠️  ONE PAIR AT A TIME PER FILE. Adding a column is a read-modify-write of the
+whole Parquet: the frame is read at startup and written back when the file
+finishes. Two pairs scoring the SAME file concurrently therefore both start from
+the version without either column, and whichever finishes last silently drops
+the other's -- with a normal exit status and a summary claiming success.
+Parallelise across *files* (science on one GPU, ghostbuster on another), never
+across pairs on one file. ``epai.utils.parquet_utils.column_fill(path, column)``
+reads one column's pages and is the cheap way to confirm afterwards that both
+columns are really there.
+
+0. Preflight -- no weights are downloaded, so this costs nothing:
+    uv run --project external/Binoculars python external/Binoculars/check_pairs.py \
+        --pairs falcon-7b qwen25-1_5b qwen25-7b falcon3-7b llama31-8b --gpu 0
+   Read: tokenizer verdict per pair (identical / extended / INCOMPATIBLE), and
+   the suggested batch size for the card the run will use. A pair reported
+   "extended" needs --allow-token-mismatch below; "INCOMPATIBLE" is out.
+
+1. Plumbing check, 20 rows into a scratch copy, with the pair already on disk:
+    uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
+        data/parquet/science_v3_gpt56luna_0811A.parquet --pair falcon3-1b --limit 20 \
+        -o /tmp/sci_pairtest.parquet --cpu-threads 16 --gpu 0
+   Expect: state "absent" for the new column (nothing to recompute -- a new pair
+   writes a new column), change.new == 20, and a summary written to
+   /tmp/sci_pairtest__binoculars_score_falcon3_1b_rescore_summary.json.
+
+2. Cheap signal check before committing to 7B weights:
+    uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
+        data/parquet/science_v3_gpt56luna_0811A.parquet --pair qwen25-1_5b \
+        --cpu-threads 16 --gpu 0 --yes
+   ~6 GiB of weights, minutes for the corpus. The only question asked of it is
+   whether the science distributions stop being inverted. If a 1.5B modern pair
+   does not move them at all, a 7B one of the same family probably will not
+   either, and the cause is not the age of the pair.
+
+3. The pairs to report, on both corpora -- the science corpus is the one that
+   fails, the Ghostbuster corpus is the control that must not break:
+    for PAIR in qwen25-7b falcon3-7b llama31-8b; do
+      uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
+          data/parquet/science_v3_gpt56luna_0811A.parquet --pair $PAIR \
+          --fp32-metrics --cpu-threads 16 --gpu 0 --yes
+      uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
+          data/parquet/ghostbuster_gpt56luna.parquet --pair $PAIR \
+          --fp32-metrics --cpu-threads 16 --gpu 0 --yes
+    done
+   Each file is ~6000 rows; the Falcon pair does that in 17-30 min at batch 1,
+   and these pairs are the same size. Add --batch-size N with the number
+   check_pairs.py suggested. --fp32-metrics is on because these vocabularies are
+   2-2.5x wider than Falcon's; drop it if memory is tight.
+
+4. Read the result, one run per column -- the analysis script averages every
+   binoculars_* column it finds unless it is told which one:
+    uv run python -m epai.ai_detection.analyse.analyse_score_human_vs_ai \
+        data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A \
+        --score-cols binoculars_score_qwen25_7b
+   ROC-AUC per domain is the number that matters: > 0.5 means the pair at least
+   points the right way, and the Falcon column in the same file is the baseline
+   to beat. Note that a row with a null in ANY selected column is dropped, so a
+   partially-scored column (a --limit run written into the real file) quietly
+   shrinks the comparison -- which is why step 1 writes to /tmp.
+
+4b. Optional, and only worth the GPU time once step 4 says a pair works: the
+   same pair over the generator series, everything else held fixed, which is the
+   figure "detector AUROC vs generator generation" is made from --
+    ghostbuster_gpt35ts.parquet:gpt35t:0000A       (2023 generator)
+    ghostbuster_gpt54mini.parquet:gpt54mini:0701A  (2025)
+    ghostbuster_gpt56luna.parquet:gpt56luna:0701A  (2026)
+   These three are comparable to each other only because all three were
+   standardised; ghostbuster_gpt35t.parquet (no trailing "s") is the
+   un-standardised original and does not belong in the series.
+
+5. Only once a pair is chosen: refit its threshold on a held-out split and pass
+   it as --threshold, otherwise the flip counts in the summaries are measured
+   against Falcon's constants and mean nothing.
 """
 
 import argparse
 import os
 from pathlib import Path
+
+# Torch-free on purpose, so the pair can be resolved (and a bad --pair rejected)
+# before the imports below pull torch in. See the CUDA_VISIBLE_DEVICES note.
+import model_pairs
+from model_pairs import COLUMN_PREFIX, DEFAULT_MAX_TOKENS, DEFAULT_PAIR, PAIRS
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,10 +242,38 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--limit", type=int, default=None,
                     help="Debug option: only score the first N rows of each file. Later "
                          "rows keep whatever they already have, they are not dropped.")
-    ap.add_argument("--observer", default="tiiuae/falcon-7b",
-                    help="Observer model name or path")
-    ap.add_argument("--performer", default="tiiuae/falcon-7b-instruct",
-                    help="Performer model name or path")
+    ap.add_argument("--pair", default=DEFAULT_PAIR, choices=sorted(PAIRS),
+                    help="Scoring pair from the registry in model_pairs.py. Sets the "
+                         "observer, the performer AND the score column together, so two "
+                         "pairs never overwrite each other's numbers. Default: "
+                         "%(default)s, the paper's pair and this repo's baseline. Run "
+                         "check_pairs.py first -- it verifies tokenizers and memory "
+                         "without downloading any weights.")
+    ap.add_argument("--observer", default=None,
+                    help="Observer model name or path, overriding --pair. Requires "
+                         "--score-column, since a pair off the registry has no column "
+                         "of its own.")
+    ap.add_argument("--performer", default=None,
+                    help="Performer model name or path, overriding --pair. Requires "
+                         "--score-column.")
+    ap.add_argument("--score-column", default=None,
+                    help="Column the scores are written to. Default: the column the "
+                         "chosen --pair owns. Scores from different pairs are NOT "
+                         "comparable, so they never share a column.")
+    ap.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+                    help="Truncation cap in tokens (default: %(default)s, the "
+                         "detector's own). Text past it is not scored, so a corpus "
+                         "whose classes differ in length is partly being compared on "
+                         "different amounts of text.")
+    ap.add_argument("--fp32-metrics", action="store_true",
+                    help="Compute perplexity and cross-perplexity in fp32 while the "
+                         "models still run in bf16. Worth it for the 128k-152k "
+                         "vocabulary pairs, where the soft-target cross-entropy sums "
+                         "over four times as many bf16 terms as Falcon's 65k.")
+    ap.add_argument("--allow-token-mismatch", action="store_true",
+                    help="Accept a pair whose tokenizers differ only in added control "
+                         "tokens (no shared token re-mapped). Report what "
+                         "check_pairs.py says before reaching for this.")
     ap.add_argument("--gpu", default=None,
                     help="value for CUDA_VISIBLE_DEVICES (which GPU(s) to use, e.g. '0' or "
                          "'0,1'). Default: leave unset so all visible GPUs are used")
@@ -158,6 +296,46 @@ def parse_args() -> argparse.Namespace:
 
 
 args = parse_args()
+
+
+def resolve_pair(args: argparse.Namespace) -> tuple[str, str, str, model_pairs.Pair | None]:
+    """(observer, performer, score column, registry entry) for this run.
+
+    The registry is the normal path: ``--pair`` names two models *and* the column
+    they own. Explicit ``--observer``/``--performer`` still work, but then the
+    column has to be named too -- writing an unregistered pair's scores into
+    ``binoculars_score`` would overwrite the Falcon baseline with numbers on a
+    different scale, and nothing downstream could tell afterwards.
+    """
+    pair = model_pairs.resolve(args.pair)
+    explicit = args.observer is not None or args.performer is not None
+    if not explicit:
+        return pair.observer, pair.performer, args.score_column or pair.column, pair
+
+    observer = args.observer or pair.observer
+    performer = args.performer or pair.performer
+    known = model_pairs.pair_for_models(observer, performer)
+    if known is not None:
+        return observer, performer, args.score_column or known.column, known
+    if args.score_column is None:
+        raise SystemExit(
+            f"--observer/--performer name a pair that is not in the registry "
+            f"({observer} + {performer}), so there is no column it owns. Pass "
+            f"--score-column NAME (starting with {COLUMN_PREFIX!r}), or add the pair "
+            f"to model_pairs.py."
+        )
+    return observer, performer, args.score_column, None
+
+
+OBSERVER, PERFORMER, SCORE_COL, PAIR = resolve_pair(args)
+
+if not SCORE_COL.startswith(COLUMN_PREFIX):
+    # Not fatal -- the column is written either way -- but the analysis script
+    # (epai/ai_detection/analyse/analyse_score_human_vs_ai.py --metric binox)
+    # finds score columns by this prefix, so a column named anything else is
+    # invisible to it unless every later run passes --score-cols by hand.
+    print(f"⚠️  Score column {SCORE_COL!r} does not start with {COLUMN_PREFIX!r}; "
+          "the human-vs-AI analysis will not pick it up on its own.")
 
 # CUDA_VISIBLE_DEVICES is read when the CUDA driver initialises, and the thread
 # limits when the OpenMP runtime loads -- both of which happen inside torch.
@@ -184,8 +362,6 @@ from binoculars.cuda_util import check_cuda  # noqa: E402
 from binoculars.detector import BINOCULARS_ACCURACY_THRESHOLD  # noqa: E402
 from binoculars.env_utils import doublecheck_env, doublecheck_pkgs  # noqa: E402
 
-SCORE_COL = "binoculars_score"
-
 # How far a recomputed score may move and still count as the same score. Binoculars
 # is a ratio of two model perplexities in the ~0.7-1.1 range, and re-running the
 # models on the same text rarely reproduces bit-identical floats, so tiny drift is
@@ -207,6 +383,22 @@ doublecheck_pkgs(pyproject_path=Path(__file__).resolve().parent / "pyproject.tom
 check_cuda()  # informational only; scoring still works on CPU, just slower
 
 FLIP_THRESHOLD = args.threshold if args.threshold is not None else BINOCULARS_ACCURACY_THRESHOLD
+
+# 0.9015 / 0.8536 were selected on Falcon-7B + Falcon-7B-Instruct outputs and mean
+# nothing for any other pair -- the score is a ratio of two *particular* models'
+# perplexities, and a new pair puts it on a different scale. The flip counts are
+# the only thing in this script that reads a threshold, and the classifier
+# downstream consumes the raw score, so an uncalibrated pair is not a reason to
+# stop; it is a reason not to read "flip_to_ai" as a verdict. A per-pair threshold
+# has to be refit on a held-out split before any accuracy/FPR table is written.
+THRESHOLD_IS_CALIBRATED = bool(args.threshold is not None or (PAIR and PAIR.calibrated))
+if not THRESHOLD_IS_CALIBRATED:
+    print(f"\n⚠️  The decision threshold {FLIP_THRESHOLD:.6f} was calibrated for "
+          f"{model_pairs.PAIRS['falcon-7b'].observer} + "
+          f"{model_pairs.PAIRS['falcon-7b'].performer}, not for this pair.\n"
+          "    Scores are still written normally; only the verdict-flip counts in the "
+          "summary are meaningless.\n"
+          "    Pass --threshold to count flips against a threshold refit for this pair.")
 
 
 @dataclass
@@ -365,8 +557,12 @@ def print_findings(statuses: list[FileStatus], text_col: str) -> None:
     print(f"  files         : {len(statuses)}")
     print(f"  text column   : {text_col!r}")
     print(f"  score column  : {SCORE_COL!r}")
-    print(f"  observer      : {args.observer}")
-    print(f"  performer     : {args.performer}")
+    print(f"  pair          : {PAIR.key if PAIR else 'unregistered'}"
+          f"{'' if THRESHOLD_IS_CALIBRATED else '  (thresholds not calibrated for it)'}")
+    print(f"  observer      : {OBSERVER}")
+    print(f"  performer     : {PERFORMER}")
+    print(f"  max tokens    : {args.max_tokens}")
+    print(f"  metrics dtype : {'fp32' if args.fp32_metrics else 'bf16 (model dtype)'}")
     print(f"  gpu           : {describe_device()}")
     print(f"  cpu threads   : {args.cpu_threads if args.cpu_threads is not None else 'unset'}")
     print("=" * 94)
@@ -517,14 +713,20 @@ def summary_payload(st: FileStatus, out_path: Path, n_scored: int, seconds: floa
         "script": Path(__file__).name,
         "input": str(st.path),
         "output": str(out_path),
-        "observer": args.observer,
-        "performer": args.performer,
+        "pair": PAIR.key if PAIR else None,
+        "observer": OBSERVER,
+        "performer": PERFORMER,
         "text_column": args.text_column,
         "score_column": SCORE_COL,
         "batch_size": args.batch_size,
+        "max_tokens": args.max_tokens,
+        "fp32_metrics": args.fp32_metrics,
         "limit": args.limit,
         "recompute": recompute_existing,
         "flip_threshold": FLIP_THRESHOLD,
+        # False => the flip counts below were measured against a threshold
+        # belonging to a different pair, and mean nothing.
+        "flip_threshold_calibrated": THRESHOLD_IS_CALIBRATED,
         "bucket_thresholds": {"identical_abs": IDENTICAL_ABS, "drift_abs": DRIFT_ABS},
         # Counts describe the --limit window, except the *_total / whole-file ones.
         "rows": {
@@ -561,7 +763,16 @@ def summary_payload(st: FileStatus, out_path: Path, n_scored: int, seconds: floa
 
 
 def summary_path_for(out_path: Path) -> Path:
-    return out_path.parent / f"{out_path.stem}_rescore_summary.json"
+    """Where one file's summary goes -- one per (output, score column).
+
+    Scoring the same corpus with a second pair writes a second column, so it must
+    also write a second summary: keeping the old name would have each pair
+    silently overwrite the record of the one before it, which is exactly the
+    comparison the runs exist to make. The baseline column keeps the original
+    name so the summaries already on disk stay where they are.
+    """
+    suffix = "" if SCORE_COL == PAIRS[DEFAULT_PAIR].column else f"__{SCORE_COL}"
+    return out_path.parent / f"{out_path.stem}{suffix}_rescore_summary.json"
 
 
 def save_summary(payload: dict[str, object], out_path: Path) -> Path:
@@ -724,8 +935,11 @@ def main() -> None:
             raise SystemExit("Aborted — no changes made.")
 
     bino = Binoculars(
-        observer_name_or_path=args.observer,
-        performer_name_or_path=args.performer,
+        observer_name_or_path=OBSERVER,
+        performer_name_or_path=PERFORMER,
+        max_token_observed=args.max_tokens,
+        strict_tokenizer_check=not args.allow_token_mismatch,
+        fp32_metrics=args.fp32_metrics,
     )
 
     done: list[tuple[FileStatus, Path, dict]] = []
