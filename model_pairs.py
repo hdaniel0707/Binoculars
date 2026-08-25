@@ -166,7 +166,8 @@ PAIRS: dict[str, Pair] = {
         performer="tiiuae/Falcon3-1B-Instruct",
         column="binoculars_score_falcon3_1b",
         params=1.67, vocab=131072, year="2024",
-        note="Already fetched by download_models.py -- the zero-download way to "
+        note="The pair download_models.py used to fetch unconditionally, so it "
+             "is probably already in the Hub cache: the cheapest way to "
              "prove the plumbing (new column, new summary file) works.",
     ),
     "mistral-v03": Pair(

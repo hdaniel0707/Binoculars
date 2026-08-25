@@ -1,4 +1,4 @@
-"""Preflight for a Binoculars scoring pair: tokenizers, memory, availability.
+r"""Preflight for a Binoculars scoring pair: tokenizers, memory, availability.
 
 Run this BEFORE ``score_parquets.py --pair ...``. Everything it checks is
 something that otherwise only fails after a multi-gigabyte download, or -- worse
@@ -36,6 +36,10 @@ Usage (from this directory, external/Binoculars):
 From the parent repo (episteme-ai):
     uv run --project external/Binoculars python external/Binoculars/check_pairs.py \
         --pairs qwen25-1_5b qwen25-7b falcon3-7b llama31-8b --gpu 0
+
+Next step for a pair that comes back usable: ``download_models.py --pairs KEY``
+fetches its weights, so the first scoring run starts scoring instead of
+downloading. ``score_parquets.py``'s own docstring holds the full run book.
 
 Exit status: 0 if every checked pair is usable (identical or merely
 extended tokenizers), 1 if any pair is unusable -- a re-mapped token, a repo

@@ -1,8 +1,9 @@
-"""Score the text column of one or more parquet files with Binoculars.
+r"""Score the text column of one or more parquet files with Binoculars.
 
-Reads each Parquet, works out which rows already hold a usable
-``binoculars_score``, reports the findings, asks whether the rows that already
-have one should be recomputed, and then fills in whatever is left.
+Reads each Parquet, works out which rows already hold a usable score in the
+column the chosen ``--pair`` owns (``binoculars_score`` by default), reports the
+findings, asks whether the rows that already have one should be recomputed, and
+then fills in whatever is left.
 
 "Already present" is decided per row, not per file: a column that exists but is
 half Null counts as *partial*, and the missing rows are filled even when the
@@ -33,7 +34,9 @@ change in three buckets -- identical / drifted / changed -- since re-running the
 models on the same text rarely reproduces bit-identical floats. It also counts
 the rows that crossed the decision threshold, which is the part that actually
 changes a downstream verdict. The summary is printed and saved next to each
-output as ``<stem>_rescore_summary.json``.
+output as ``<stem>_rescore_summary.json``, or ``<stem>__<column>_rescore_summary.json``
+for a pair other than the default -- so scoring one corpus with two pairs leaves
+two records rather than one overwriting the other.
 
 ``--limit N`` scores only the first N rows of a file, for debugging or timing a
 run before committing to the whole corpus. Rows past the limit keep whatever
@@ -70,152 +73,137 @@ same experiments: the truncation cap, fp32 metrics for the wide-vocabulary pairs
 over Falcon's 65k), and the escape hatch for a base/instruct pair whose
 tokenizers differ only in added chat tokens. Run ``check_pairs.py`` before any of
 them -- it settles tokenizer compatibility and memory from tokenizers alone,
-before 30 GB of weights is downloaded.
+before 30 GB of weights is downloaded -- and ``download_models.py --pairs`` after
+it, so the weights arrive before the scoring rather than during it.
 
 ``--gpu`` and ``--cpu-threads`` pin the run to one GPU and cap the CPU pools, so
 several corpora can be scored side by side on a multi-GPU box without the runs
 fighting each other for threads. Both are applied before torch is imported,
 which is why the command line is parsed at module level.
 
-Usage (from this directory, external/Binoculars):
-    # fill in only the rows that have no score yet (the default)
-    uv run python score_parquets.py data/wp.parquet --cpu-threads 16 --gpu 0
-    uv run python score_parquets.py data/ --text-column text --batch-size 16
-
-    # rescore every row, keeping a record of what moved
-    uv run python score_parquets.py data/wp_binox0.parquet --recompute --cpu-threads 16 --gpu 0
-    uv run python score_parquets.py data/essay_binox0.parquet --recompute --cpu-threads 16 --gpu 1
-    uv run python score_parquets.py data/reuter_binox0.parquet --recompute --cpu-threads 16 --gpu 6
-
-Debugging a rescore before committing to the full corpus:
-    # 1. 20 rows, into a scratch copy, rescoring what is already there.
-    #    Keep the prompts (no --yes) the first time so the findings table can be
-    #    read before anything is written.
-    uv run python score_parquets.py data/wp_binox0.parquet \
-        --recompute --limit 20 -o data/wp_debug.parquet --cpu-threads 16 --gpu 0
-
-    # 2. Check the findings table before confirming:
-    #      window == 20, scored == 20, missing == 0, blank == 0
-    #    "scored 20" is what makes this a real test of --recompute: every row in
-    #    the window has an old score, so all 20 land in the "compared" bucket.
-    #    A window showing missing == 20 means the rows were never scored and the
-    #    run would only be filling gaps -- it would not exercise the diff at all.
-
-    # 3. Check the printed summary and data/wp_debug_rescore_summary.json:
-    #      change.compared == 20, change.new == 0, change.lost == 0
-    #      identical + drifted + changed == 20
-    #    Then diff the scratch copy against the original to confirm only the
-    #    first 20 rows moved; wp_debug.parquet is a full copy of the file.
-
-    # 4. Happy with it -> drop --limit and -o and rescore in place.
-    uv run python score_parquets.py data/wp_binox0.parquet --recompute --cpu-threads 16 --gpu 0
-
-Running from the parent repo (episteme-ai), which vendors this one as a submodule:
-    # --project points uv at THIS submodule's venv, which is separate from the
-    # parent's on purpose (incompatible transformers pins) and is the only one
-    # holding torch + the binoculars package. Without it the parent's venv is
-    # used and the doublecheck_pkgs table at startup comes up all "Missing".
-    uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
-        data/parquet/wp_binox0.parquet --recompute --limit 20 \
-        -o data/parquet/wp_debug.parquet --cpu-threads 16 --gpu 0
-
-    # Paths are resolved against the cwd, so from the parent root they are the
-    # parent's own data/parquet/*.parquet -- which is where the corpora actually
-    # live. HF_TOKEN comes from the parent's .env either way: load_dotenv() walks
-    # up from this file and finds it, since this submodule has no .env of its own
-    # (only .env_sample). The doublecheck_env(".env") banner is cwd-relative, so
-    # it prints the parent's keys from here and "Did not find file .env." from
-    # inside the submodule -- informational only, it gates nothing.
-
-My example:
-    uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
-        data/parquet/x_ghostbuster_gpt54mini_0807A.parquet --recompute --limit 20 \
-        -o data/parquet/x_ghostbuster_gpt54mini_0807A_binox0.parquet --cpu-threads 16 --gpu 5
-
 --------------------------------------------------------------------------------
-COMPARING SCORING PAIRS -- the run book
+HOW TO RUN
 --------------------------------------------------------------------------------
-Why: with the Falcon pair, gpt-5.6-luna text is separated on the Ghostbuster
-domains (ROC-AUC 0.74-0.84) and *inverted* on the science domains (0.19-0.46,
-AI scoring above human). Same generator, same standardisation, opposite result,
-so the question is whether a newer, more science-competent pair recovers the
-science domains without losing the Ghostbuster ones. Every command below is run
-from the parent repo root (episteme-ai). Commands are given for GPU 0; change
---gpu per run to spread them over the box.
+Always from the parent repo root (episteme-ai), never from inside the submodule.
+``--project`` points uv at THIS submodule's venv, which is separate from the
+parent's on purpose (incompatible transformers pins) and is the only one holding
+torch + the binoculars package -- without it the doublecheck_pkgs table at
+startup comes up all "Missing". Paths resolve against the cwd, so they are the
+parent's own data/parquet/*.parquet where the corpora actually live, and HF_TOKEN
+comes from the parent's .env (load_dotenv walks up; this submodule has only
+.env_sample, so the cwd-relative doublecheck_env banner prints the parent's keys
+from here and nothing from inside the submodule -- informational, it gates
+nothing).
+
+The prefix is the same every time, so the recipes below use a shorthand:
+
+    BINO="uv run --project external/Binoculars python external/Binoculars"
+
+1. Check the pair. Tokenizers and memory arithmetic only, nothing downloaded:
+       $BINO/check_pairs.py --pairs qwen25-7b --gpu 0
+   Gives the tokenizer verdict (identical / extended / INCOMPATIBLE -- "extended"
+   needs --allow-token-mismatch, "INCOMPATIBLE" is out) and a batch size for the
+   card actually present.
+
+2. Fetch the weights, so the first scoring run is not a silent half-hour stall
+   inside Binoculars(...):
+       $BINO/download_models.py --pairs qwen25-7b
+
+3. Smoke-test 20 rows into a scratch copy, prompts left on so the findings table
+   can be read before anything is written:
+       $BINO/score_parquets.py data/parquet/<corpus>.parquet --pair qwen25-7b \
+           --limit 20 -o /tmp/smoke.parquet --cpu-threads 16 --gpu 0
+
+4. Score the corpus, in place:
+       $BINO/score_parquets.py data/parquet/<corpus>.parquet --pair qwen25-7b \
+           --fp32-metrics --cpu-threads 16 --gpu 0 --yes
+
+5. Confirm the column landed: ``epai.utils.parquet_utils.column_fill(path, col)``
+   reads that one column's pages and returns (present, n_filled, n_rows) --
+   (True, 6000, 6000) for a finished corpus, and cheap even on a 300 MB file.
+
+Three jobs that are easy to confuse, and the flags differ:
+
+  * A NEW PAIR writes a NEW column. The findings table reports it as "absent",
+    every row is scored, and --recompute is neither needed nor meaningful. The
+    existing binoculars_score is not read and not touched.
+  * The SAME pair on a partly-filled column fills only the Null rows. This is
+    the default, and what the pipelines rely on.
+  * The SAME pair over rows that already hold a value needs --recompute, and
+    that is the only path producing the identical/drifted/changed diff. With
+    --limit 20 and a scratch -o it is a two-minute test of the whole diff path;
+    the findings table should show window 20, scored 20, missing 0, and the
+    summary change.compared 20 / new 0 / lost 0.
 
 ⚠️  ONE PAIR AT A TIME PER FILE. Adding a column is a read-modify-write of the
 whole Parquet: the frame is read at startup and written back when the file
-finishes. Two pairs scoring the SAME file concurrently therefore both start from
-the version without either column, and whichever finishes last silently drops
-the other's -- with a normal exit status and a summary claiming success.
-Parallelise across *files* (science on one GPU, ghostbuster on another), never
-across pairs on one file. ``epai.utils.parquet_utils.column_fill(path, column)``
-reads one column's pages and is the cheap way to confirm afterwards that both
-columns are really there.
+finishes. Two pairs scoring the SAME file concurrently both start from the
+version without either column, and whichever finishes last silently drops the
+other's -- with a normal exit status and a summary claiming success. Parallelise
+across *files* (science on one GPU, ghostbuster on another), never across pairs
+on one file.
 
-0. Preflight -- no weights are downloaded, so this costs nothing:
-    uv run --project external/Binoculars python external/Binoculars/check_pairs.py \
+--------------------------------------------------------------------------------
+THIS RUN -- comparing scoring pairs on the gpt-5.6-luna corpora
+--------------------------------------------------------------------------------
+Why: with the Falcon pair, luna text separates on the Ghostbuster domains
+(ROC-AUC 0.74-0.84) and *inverts* on the science domains (0.19-0.46 -- AI scoring
+above human). Same generator, same standardisation, opposite result. So the
+question is whether a newer, science-competent pair recovers science without
+losing Ghostbuster: science is the corpus that fails, Ghostbuster the control
+that must not break.
+
+    # 1. preflight the shortlist -- decides batch size and rules out bad pairs
+    $BINO/check_pairs.py \
         --pairs falcon-7b qwen25-1_5b qwen25-7b falcon3-7b llama31-8b --gpu 0
-   Read: tokenizer verdict per pair (identical / extended / INCOMPATIBLE), and
-   the suggested batch size for the card the run will use. A pair reported
-   "extended" needs --allow-token-mismatch below; "INCOMPATIBLE" is out.
 
-1. Plumbing check, 20 rows into a scratch copy, with the pair already on disk:
-    uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
-        data/parquet/science_v3_gpt56luna_0811A.parquet --pair falcon3-1b --limit 20 \
-        -o /tmp/sci_pairtest.parquet --cpu-threads 16 --gpu 0
-   Expect: state "absent" for the new column (nothing to recompute -- a new pair
-   writes a new column), change.new == 20, and a summary written to
-   /tmp/sci_pairtest__binoculars_score_falcon3_1b_rescore_summary.json.
+    # 2. plumbing, on a pair small enough to be in the Hub cache already
+    $BINO/score_parquets.py data/parquet/science_v3_gpt56luna_0811A.parquet \
+        --pair falcon3-1b --limit 20 -o /tmp/sci_pairtest.parquet \
+        --cpu-threads 16 --gpu 0
 
-2. Cheap signal check before committing to 7B weights:
-    uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
-        data/parquet/science_v3_gpt56luna_0811A.parquet --pair qwen25-1_5b \
-        --cpu-threads 16 --gpu 0 --yes
-   ~6 GiB of weights, minutes for the corpus. The only question asked of it is
-   whether the science distributions stop being inverted. If a 1.5B modern pair
-   does not move them at all, a 7B one of the same family probably will not
-   either, and the cause is not the age of the pair.
-
-3. The pairs to report, on both corpora -- the science corpus is the one that
-   fails, the Ghostbuster corpus is the control that must not break:
-    for PAIR in qwen25-7b falcon3-7b llama31-8b; do
-      uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
-          data/parquet/science_v3_gpt56luna_0811A.parquet --pair $PAIR \
-          --fp32-metrics --cpu-threads 16 --gpu 0 --yes
-      uv run --project external/Binoculars python external/Binoculars/score_parquets.py \
-          data/parquet/ghostbuster_gpt56luna.parquet --pair $PAIR \
-          --fp32-metrics --cpu-threads 16 --gpu 0 --yes
-    done
-   Each file is ~6000 rows; the Falcon pair does that in 17-30 min at batch 1,
-   and these pairs are the same size. Add --batch-size N with the number
-   check_pairs.py suggested. --fp32-metrics is on because these vocabularies are
-   2-2.5x wider than Falcon's; drop it if memory is tight.
-
-4. Read the result, one run per column -- the analysis script averages every
-   binoculars_* column it finds unless it is told which one:
+    # 3. THE DECISION POINT: ~6 GiB of weights, minutes to score
+    $BINO/download_models.py --pairs qwen25-1_5b
+    $BINO/score_parquets.py data/parquet/science_v3_gpt56luna_0811A.parquet \
+        --pair qwen25-1_5b --cpu-threads 16 --gpu 0 --yes
     uv run python -m epai.ai_detection.analyse.analyse_score_human_vs_ai \
         data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A \
-        --score-cols binoculars_score_qwen25_7b
-   ROC-AUC per domain is the number that matters: > 0.5 means the pair at least
-   points the right way, and the Falcon column in the same file is the baseline
-   to beat. Note that a row with a null in ANY selected column is dropped, so a
-   partially-scored column (a --limit run written into the real file) quietly
-   shrinks the comparison -- which is why step 1 writes to /tmp.
+        --score-cols binoculars_score_qwen25_1_5b
+    # If a modern 1.5B pair does not lift science off 0.19/0.31/0.46, the age of
+    # the scoring pair is not the cause, the 7B runs are wasted, and the thing to
+    # audit is the preprocessing.
 
-4b. Optional, and only worth the GPU time once step 4 says a pair works: the
-   same pair over the generator series, everything else held fixed, which is the
-   figure "detector AUROC vs generator generation" is made from --
-    ghostbuster_gpt35ts.parquet:gpt35t:0000A       (2023 generator)
-    ghostbuster_gpt54mini.parquet:gpt54mini:0701A  (2025)
-    ghostbuster_gpt56luna.parquet:gpt56luna:0701A  (2026)
-   These three are comparable to each other only because all three were
-   standardised; ghostbuster_gpt35t.parquet (no trailing "s") is the
-   un-standardised original and does not belong in the series.
+    # 4. the pairs to report: ~20-35 min per file per pair at batch 1
+    $BINO/download_models.py --pairs qwen25-7b falcon3-7b llama31-8b
+    for PAIR in qwen25-7b falcon3-7b llama31-8b; do
+      for F in science_v3_gpt56luna_0811A ghostbuster_gpt56luna; do
+        $BINO/score_parquets.py data/parquet/$F.parquet --pair $PAIR \
+            --fp32-metrics --cpu-threads 16 --gpu 0 --yes
+      done
+    done
 
-5. Only once a pair is chosen: refit its threshold on a held-out split and pass
-   it as --threshold, otherwise the flip counts in the summaries are measured
-   against Falcon's constants and mean nothing.
+    # 5. read it, ONE COLUMN PER RUN -- given several, the analyser averages
+    #    them into one meaningless score
+    for C in binoculars_score binoculars_score_qwen25_7b binoculars_score_falcon3_7b; do
+      uv run python -m epai.ai_detection.analyse.analyse_score_human_vs_ai \
+          data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A --score-cols $C
+      uv run python -m epai.ai_detection.analyse.analyse_score_human_vs_ai \
+          data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A --score-cols $C
+    done
+
+ROC-AUC per domain is the number that decides: above 0.5 means the pair points
+the right way at all, the Falcon column in the same file is the baseline to beat,
+and Ghostbuster has to stay near 0.74-0.84 or the pair fixed one domain by
+breaking another. A row with a null in ANY selected column is dropped from the
+comparison, which is why the smoke test writes to /tmp and never into the corpus.
+
+Only after a pair is chosen: the generator series with it, everything else held
+fixed (ghostbuster_gpt35ts:gpt35t:0000A -> ghostbuster_gpt54mini:gpt54mini:0701A
+-> ghostbuster_gpt56luna:gpt56luna:0701A -- all three standardised, unlike
+ghostbuster_gpt35t.parquet without the trailing "s"); a threshold refit on a
+held-out split, passed as --threshold, since the flip counts otherwise measure
+against Falcon's constants; and the pair's column added to the
+``binoculars_baseline: columns:`` block of the clf configs.
 """
 
 import argparse
