@@ -166,7 +166,7 @@ that must not break.
     $BINO/download_models.py --pairs qwen25-1_5b
     $BINO/score_parquets.py data/parquet/science_v3_gpt56luna_0811A.parquet \
         --pair qwen25-1_5b --cpu-threads 16 --gpu 0 --yes
-    uv run python -m epai.ai_detection.analyse.analyse_score_human_vs_ai \
+    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
         data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A \
         --score-cols binoculars_score_qwen25_1_5b
     # If a modern 1.5B pair does not lift science off 0.19/0.31/0.46, the age of
@@ -185,10 +185,12 @@ that must not break.
     # 5. read it, ONE COLUMN PER RUN -- given several, the analyser averages
     #    them into one meaningless score
     for C in binoculars_score binoculars_score_qwen25_7b binoculars_score_falcon3_7b; do
-      uv run python -m epai.ai_detection.analyse.analyse_score_human_vs_ai \
-          data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A --score-cols $C
-      uv run python -m epai.ai_detection.analyse.analyse_score_human_vs_ai \
-          data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A --score-cols $C
+      uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+          data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A \
+          --score-cols $C
+      uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
+          data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A \
+          --score-cols $C
     done
 
 ROC-AUC per domain is the number that decides: above 0.5 means the pair points
