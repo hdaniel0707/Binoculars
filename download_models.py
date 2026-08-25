@@ -14,6 +14,10 @@ Usage (from this directory, external/Binoculars):
 Gated repos (Llama, Gemma) need HF_TOKEN in the parent .env and an accepted
 licence on the Hub; ``check_pairs.py`` reports which pairs those are before
 anything is fetched.
+
+uv run --project external/Binoculars python external/Binoculars/download_models.py --pairs qwen25-7b
+uv run --project external/Binoculars python external/Binoculars/download_models.py --pairs falcon3-7b
+uv run --project external/Binoculars python external/Binoculars/download_models.py --pairs llama31-8b
 """
 
 import argparse
