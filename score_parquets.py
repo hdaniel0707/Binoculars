@@ -84,7 +84,7 @@ which is why the command line is parsed at module level.
 --------------------------------------------------------------------------------
 HOW TO RUN
 --------------------------------------------------------------------------------
-Always from the parent repo root (episteme-ai), never from inside the submodule.
+Always from the parent repository's root, never from inside the submodule.
 ``--project`` points uv at THIS submodule's venv, which is separate from the
 parent's on purpose (incompatible transformers pins) and is the only one holding
 torch + the binoculars package -- without it the doublecheck_pkgs table at
@@ -98,6 +98,7 @@ nothing).
 The prefix is the same every time, so the recipes below use a shorthand:
 
     BINO="uv run --project external/Binoculars python external/Binoculars"
+    ANALYSE="<the parent repository's human-vs-AI score analysis script>"
 
 1. Check the pair. Tokenizers and memory arithmetic only, nothing downloaded:
        $BINO/check_pairs.py --pairs qwen25-7b --gpu 0
@@ -118,9 +119,9 @@ The prefix is the same every time, so the recipes below use a shorthand:
        $BINO/score_parquets.py data/parquet/<corpus>.parquet --pair qwen25-7b \
            --fp32-metrics --cpu-threads 16 --gpu 0 --yes
 
-5. Confirm the column landed: ``epai.utils.parquet_utils.column_fill(path, col)``
-   reads that one column's pages and returns (present, n_filled, n_rows) --
-   (True, 6000, 6000) for a finished corpus, and cheap even on a 300 MB file.
+5. Confirm the column landed: read just that column
+   (``pyarrow.parquet.read_table(path, columns=[col])``) and check that every
+   row is filled -- cheap even on a 300 MB file.
 
 Three jobs that are easy to confuse, and the flags differ:
 
@@ -166,8 +167,7 @@ that must not break.
     $BINO/download_models.py --pairs qwen25-1_5b
     $BINO/score_parquets.py data/parquet/science_v3_gpt56luna_0811A.parquet \
         --pair qwen25-1_5b --cpu-threads 16 --gpu 0 --yes
-    uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
-        data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A \
+    $ANALYSE data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A \
         --score-cols binoculars_score_qwen25_1_5b
     # If a modern 1.5B pair does not lift science off 0.19/0.31/0.46, the age of
     # the scoring pair is not the cause, the 7B runs are wasted, and the thing to
@@ -185,11 +185,9 @@ that must not break.
     # 5. read it, ONE COLUMN PER RUN -- given several, the analyser averages
     #    them into one meaningless score
     for C in binoculars_score binoculars_score_qwen25_7b binoculars_score_falcon3_7b; do
-      uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
-          data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A \
+      $ANALYSE data/parquet/science_v3_gpt56luna_0811A.parquet:gpt56luna:0811A \
           --score-cols $C
-      uv run python epai/ai_detection/analyse/analyse_score_human_vs_ai.py \
-          data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A \
+      $ANALYSE data/parquet/ghostbuster_gpt56luna.parquet:gpt56luna:0701A \
           --score-cols $C
     done
 
@@ -321,7 +319,7 @@ OBSERVER, PERFORMER, SCORE_COL, PAIR = resolve_pair(args)
 
 if not SCORE_COL.startswith(COLUMN_PREFIX):
     # Not fatal -- the column is written either way -- but the analysis script
-    # (epai/ai_detection/analyse/analyse_score_human_vs_ai.py --metric binox)
+    # (the parent repository's score-analysis script, --metric binox)
     # finds score columns by this prefix, so a column named anything else is
     # invisible to it unless every later run passes --score-cols by hand.
     print(f"⚠️  Score column {SCORE_COL!r} does not start with {COLUMN_PREFIX!r}; "

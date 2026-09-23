@@ -194,9 +194,8 @@ PAIRS: dict[str, Pair] = {
 
 DEFAULT_PAIR = "falcon-7b"
 
-# Every score column starts with this, which is what makes
-# epai/ai_detection/analyse/analyse_score_human_vs_ai.py --metric binox find
-# them. That script averages every matching column unless it is given
+# Every score column starts with this, which is what makes the parent
+# repository's score-analysis script (``--metric binox``) find them. That script averages every matching column unless it is given
 # --score-cols, so one run per pair, naming its column, is the correct usage.
 COLUMN_PREFIX = "binoculars_"
 

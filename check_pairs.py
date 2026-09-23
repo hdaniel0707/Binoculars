@@ -33,7 +33,7 @@ Usage (from this directory, external/Binoculars):
     # skip the network entirely: table and memory arithmetic only
     uv run python check_pairs.py --no-tokenizer-check
 
-From the parent repo (episteme-ai):
+From the parent repository's root:
     uv run --project external/Binoculars python external/Binoculars/check_pairs.py \
         --pairs qwen25-1_5b qwen25-7b falcon3-7b llama31-8b --gpu 0
 
